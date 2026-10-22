@@ -38,6 +38,7 @@ jobs:
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
           WEBHOOK_URL_3D: ${{ secrets.WEBHOOK_URL_3D }}
           ROLE_ID: ${{ vars.ROLE_ID }}
+          ROLE_ID_3D: ${{ vars.ROLE_ID_3D }}
         run: |
           if [ "${{ inputs.modo_teste }}" = "true" ]; then
             python rss_checker.py --check
