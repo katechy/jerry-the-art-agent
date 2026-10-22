@@ -2,6 +2,7 @@ import feedparser
 import requests
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -302,6 +303,8 @@ def check_feeds():
 
     state = load_state()
     to_send = []
+    # Ordem aleatória a cada execução: se o Reddit limitar no meio, não é sempre o mesmo sub que fica de fora
+    random.shuffle(SUBS)
 
     for i, si in enumerate(SUBS):
         if out_of_time():
