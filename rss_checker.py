@@ -45,22 +45,29 @@ ART_WORDS = KEYWORDS_3D + ["artist", "art", "illustrat", "drawing", "draw", "cha
 # Se o post não tiver flair, o bot procura o mesmo trecho entre [colchetes] no título.
 # "exigir_palavras": o post só passa se tiver pelo menos uma dessas palavras.
 # "canal": "3d" manda tudo do sub para o canal de 3D.
+# "busca": para subs que não põem [Hiring] no título, usa a busca do Reddit por flair
+#          (todos os resultados já contam como vaga).
 # ------------------------------------------------------------
 SUBS = [
     {"sub": "artcommissions",     "name": "🎨 Art Commissions",    "flairs": ["patron", "hiring"]},
     {"sub": "HungryArtists",      "name": "🖌️ HungryArtists",      "flairs": ["hiring"]},
     {"sub": "commissions",        "name": "💼 Commissions",        "flairs": ["hiring", "patron"]},
     {"sub": "artcommission",      "name": "🎨 ArtCommission",      "flairs": ["hiring", "patron"]},
-    {"sub": "ComicBookCollabs",   "name": "📚 ComicBookCollabs",   "flairs": ["paid"]},
+    {"sub": "ComicBookCollabs",   "name": "📚 ComicBookCollabs",   "flairs": ["paid"],
+     "busca": "flair:Paid"},
     {"sub": "starvingartists",    "name": "🍽️ StarvingArtists",    "flairs": ["hiring"]},
-    {"sub": "hireanartist",       "name": "👨‍🎨 HireAnArtist",       "flairs": ["hiring"]},
+    {"sub": "hireanartist",       "name": "👨‍🎨 HireAnArtist",       "flairs": ["hiring"],
+     "busca": "flair:Hiring"},
     {"sub": "Artistsforhire",     "name": "🎯 ArtistsForHire",     "flairs": ["hiring"]},
     {"sub": "gameDevClassifieds", "name": "🎮 GameDev Classifieds",
      "flairs": ["paid - 2d", "paid - 3d", "paid - multiple"]},
-    {"sub": "FurryCommissions",   "name": "🦊 FurryCommissions",   "flairs": ["seeking", "hiring"]},
     {"sub": "forhire",            "name": "💼 ForHire (arte)",     "flairs": ["hiring"],
      "exigir_palavras": ART_WORDS},
 ]
+
+# O GitHub divide o mesmo IP com muita gente e o Reddit recusa o formato JSON (que traz
+# o flair) vindo de lá. Deixe False no GitHub; True só se rodar no seu próprio PC.
+USAR_JSON = os.environ.get("USAR_JSON", "").lower() == "true"
 
 HEADERS = {"User-Agent": "linux:jerry-o-agente-de-arte:v2.1 (bot de commissions para Discord)"}
 STATE_FILE = "last_posted.json"
@@ -115,9 +122,12 @@ def _get(url):
     return None
 
 
-def fetch_posts(sub):
-    """Busca os posts novos do sub. Tenta o JSON (traz flair e +18); se falhar, usa o RSS."""
-    r = _get(f"https://www.reddit.com/r/{sub}/new.json?limit=50&raw_json=1")
+def fetch_posts(sub_info):
+    """Busca os posts novos do sub (RSS; JSON opcional, que traz flair e +18)."""
+    sub = sub_info["sub"]
+    r = None
+    if USAR_JSON and not sub_info.get("busca"):
+        r = _get(f"https://www.reddit.com/r/{sub}/new.json?limit=50&raw_json=1")
     if r is not None:
         try:
             out = []
@@ -132,13 +142,19 @@ def fetch_posts(sub):
                     "flair": d.get("link_flair_text") or "",
                     "nsfw": bool(d.get("over_18")),
                     "created": d.get("created_utc", 0),
+                    "via_busca": False,
                 })
             return out
         except (ValueError, KeyError, TypeError):
             pass
+        time.sleep(PAUSA_ENTRE_SUBS)
 
-    time.sleep(PAUSA_ENTRE_SUBS)
-    r = _get(f"https://www.reddit.com/r/{sub}/new/.rss?limit=50")
+    if sub_info.get("busca"):
+        q = requests.utils.quote(sub_info["busca"])
+        url = f"https://www.reddit.com/r/{sub}/search.rss?q={q}&sort=new&restrict_sr=on&limit=50"
+    else:
+        url = f"https://www.reddit.com/r/{sub}/new/.rss?limit=50"
+    r = _get(url)
     if r is None:
         return None
     feed = feedparser.parse(r.content)
@@ -153,6 +169,7 @@ def fetch_posts(sub):
             "flair": "",
             "nsfw": False,
             "created": time.mktime(e.updated_parsed) if e.get("updated_parsed") else 0,
+            "via_busca": bool(sub_info.get("busca")),
         })
     return out
 
@@ -166,6 +183,8 @@ def _has_any(text, words):
 
 
 def matches_flair(post, sub_info):
+    if post.get("via_busca"):
+        return True  # a própria busca do Reddit já filtrou pelo flair
     wanted = [f.lower() for f in sub_info["flairs"]]
     flair = post["flair"].lower()
     if flair:
@@ -263,7 +282,7 @@ def check_only():
             break
         if i:
             time.sleep(PAUSA_ENTRE_SUBS)
-        posts = fetch_posts(si["sub"])
+        posts = fetch_posts(si)
         if posts is None:
             print(f"❌ r/{si['sub']}: erro ({LAST_ERROR['msg']})")
             continue
@@ -291,7 +310,7 @@ def check_feeds():
         if i:
             time.sleep(PAUSA_ENTRE_SUBS)
         print(f"Verificando r/{si['sub']}...")
-        posts = fetch_posts(si["sub"])
+        posts = fetch_posts(si)
         if posts is None:
             print(f"   ❌ {LAST_ERROR['msg']}")
             continue
