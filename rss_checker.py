@@ -42,6 +42,10 @@ HEADERS = {"User-Agent": "linux:jerry-o-agente-de-arte:v2.0 (bot de commissions 
 
 STATE_FILE = "last_posted.json"
 
+# Pausa entre um feed e outro. O Reddit aceita ~10 pedidos por minuto sem login;
+# abaixo de uns 6 segundos ele começa a responder "429 Too Many Requests".
+PAUSA_ENTRE_FEEDS = 7
+
 FEEDS = [
     {
         "url": "https://www.reddit.com/r/artcommissions/search.rss?q=flair%3APatron&sort=new&restrict_sr=on",
@@ -106,22 +110,26 @@ FEEDS = [
         # r/forhire é o maior quadro geral de freelas; aqui só os pedidos de 3D
         "url": "https://www.reddit.com/r/forhire/search.rss?q=flair%3AHiring%20%283D%20OR%20blender%20OR%20maya%20OR%20zbrush%20OR%20rigging%29&sort=new&restrict_sr=on",
         "name": "🧊 ForHire - 3D",
-        "canal": "3d"
+        "canal": "3d",
+        "exigir_palavras": KEYWORDS_3D
     },
     {
         "url": "https://www.reddit.com/r/forhire/search.rss?q=flair%3AHiring%20%28vtuber%20OR%20vrchat%20OR%20avatar%29&sort=new&restrict_sr=on",
-        "name": "🧊 ForHire - Avatar / VTuber / VRChat",
-        "canal": "3d"
+        # Sem "canal": avatar Live2D é 2D, VRChat/VRM é 3D; o bot decide pelas palavras.
+        "name": "🎭 ForHire - Avatar / VTuber / VRChat",
+        "exigir_palavras": ["vtuber", "vrchat", "avatar", "live2d", "vrm", "vtube"]
     },
     {
         "url": "https://www.reddit.com/r/gameDevClassifieds/search.rss?q=flair%3APAID%20%283D%20OR%20blender%20OR%20modeler%29&sort=new&restrict_sr=on",
         "name": "🧊 GameDev - Pagos com 3D (busca ampla)",
-        "canal": "3d"
+        "canal": "3d",
+        "exigir_palavras": KEYWORDS_3D
     },
     {
         "url": "https://www.reddit.com/r/HungryArtists/search.rss?q=flair%3AHiring%20%283D%20OR%20blender%20OR%20vrchat%29&sort=new&restrict_sr=on",
         "name": "🧊 HungryArtists - 3D",
-        "canal": "3d"
+        "canal": "3d",
+        "exigir_palavras": KEYWORDS_3D
     }
 ]
 
@@ -141,19 +149,40 @@ def save_state(state):
         json.dump(state, f, indent=2, ensure_ascii=False)
 
 
+LAST_ERROR = {"msg": ""}
+
+
+def _wait_from_headers(r, default):
+    """Usa o tempo de espera que o próprio Reddit informa, se vier."""
+    for h in ("Retry-After", "x-ratelimit-reset"):
+        try:
+            return min(max(float(r.headers[h]), 1), 90)
+        except (KeyError, ValueError):
+            pass
+    return default
+
+
 def fetch_feed(url):
-    """Baixa o feed com User-Agent próprio (o padrão do feedparser costuma levar 403/429)."""
-    for attempt in range(3):
+    """Baixa o feed com User-Agent próprio e respeita o limite de pedidos do Reddit."""
+    LAST_ERROR["msg"] = ""
+    for attempt in range(4):
         try:
             r = requests.get(url, headers=HEADERS, timeout=20)
             if r.status_code == 429:
-                time.sleep(5 * (attempt + 1))
+                wait = _wait_from_headers(r, 20 * (attempt + 1))
+                LAST_ERROR["msg"] = f"429 limite do Reddit (esperei {wait:.0f}s)"
+                time.sleep(wait)
                 continue
-            r.raise_for_status()
+            if r.status_code >= 400:
+                LAST_ERROR["msg"] = f"HTTP {r.status_code}"
+                if r.status_code in (403, 404):
+                    return None  # bloqueado / sub não existe: não adianta repetir
+                time.sleep(10)
+                continue
             return feedparser.parse(r.content)
         except requests.RequestException as e:
-            print(f"   ⚠️ Falha ao baixar ({e})")
-            time.sleep(3)
+            LAST_ERROR["msg"] = str(e)[:80]
+            time.sleep(10)
     return None
 
 
@@ -167,6 +196,15 @@ def clean_html(text):
                 .replace("&quot;", '"').replace("&#39;", "'"))
     text = re.sub(r"\s+", " ", text).strip()
     return text[:600] + ("…" if len(text) > 600 else "")
+
+
+def has_required_words(entry, feed_info):
+    """Feeds de busca às vezes trazem posts sem relação; confere as palavras aqui também."""
+    words = feed_info.get("exigir_palavras")
+    if not words:
+        return True
+    blob = " " + (entry.get("title", "") + " " + entry.get("summary", "")).lower() + " "
+    return any(re.search(r"(?<![a-z0-9])" + re.escape(w) + r"(?![a-z0-9])", blob) for w in words)
 
 
 def is_blocked(entry):
@@ -212,17 +250,36 @@ def build_embed(entry, feed_name, is3d=False):
     return embed
 
 
+def list_flairs(feed_url):
+    """Mostra os flairs que existem de verdade no sub (para corrigir buscas vazias)."""
+    m = re.search(r"reddit\.com/r/([^/]+)/", feed_url)
+    if not m:
+        return
+    try:
+        r = requests.get(f"https://www.reddit.com/r/{m.group(1)}/new.json?limit=100",
+                         headers=HEADERS, timeout=20)
+        posts = r.json()["data"]["children"]
+    except Exception:
+        print(f"{'':32}   (não consegui listar os flairs)")
+        return
+    flairs = sorted({p["data"].get("link_flair_text") or "(sem flair)" for p in posts})
+    print(f"{'':32}   flairs que existem em r/{m.group(1)}: {flairs}")
+
+
 def check_only():
     """Modo teste: mostra quantos posts cada feed retorna, sem enviar nada."""
     print("Testando feeds (nada será enviado)...\n")
     for fi in FEEDS:
         feed = fetch_feed(fi["url"])
         n = len(feed.entries) if feed else -1
-        status = "❌ erro ao baixar" if n < 0 else ("⚠️ 0 posts (flair/busca errada?)" if n == 0 else f"✅ {n} posts")
+        status = f"❌ erro ({LAST_ERROR['msg']})" if n < 0 else ("⚠️ 0 posts (flair/busca errada?)" if n == 0 else f"✅ {n} posts")
         print(f"{status:32} {fi['name']}")
         if feed and feed.entries:
             print(f"{'':32}   último: {feed.entries[0].get('title', '')[:70]}")
-        time.sleep(2)
+        elif feed is not None:
+            time.sleep(PAUSA_ENTRE_FEEDS)
+            list_flairs(fi["url"])
+        time.sleep(PAUSA_ENTRE_FEEDS)
 
 
 def check_feeds():
@@ -238,7 +295,10 @@ def check_feeds():
         url, name = feed_info["url"], feed_info["name"]
         print(f"Verificando {name}...")
         feed = fetch_feed(url)
-        if feed is None or not feed.entries:
+        if feed is None:
+            print(f"   ❌ {LAST_ERROR['msg']}")
+            continue
+        if not feed.entries:
             continue
 
         first_run = url not in state
@@ -253,12 +313,12 @@ def check_feeds():
             seen.insert(0, eid)
             all_seen.add(eid)
             # Na primeira vez que vê um feed só marca como lido (não despeja posts antigos)
-            if first_run or is_blocked(entry):
+            if first_run or is_blocked(entry) or not has_required_words(entry, feed_info):
                 continue
             to_send.append((entry, feed_info))
 
         state[url] = seen[:SEEN_LIMIT]
-        time.sleep(2)  # educado com o Reddit
+        time.sleep(PAUSA_ENTRE_FEEDS)  # educado com o Reddit
 
     # Mais antigos primeiro, para o canal ficar em ordem cronológica
     to_send.sort(key=lambda x: x[0].get("updated_parsed") or time.gmtime(0))
