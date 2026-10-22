@@ -21,9 +21,12 @@ KEYWORDS_3D = ["3d", "blender", "maya", "zbrush", "substance", "vrchat", "vrm",
                "unity avatar", "low poly", "lowpoly", "sculpt", "rigging", "rigger",
                "3d print", "stl", "hard surface", "retopo", "texturing"]
 
-# (Opcional) ID de um cargo para marcar a cada oportunidade, ex: @Commissions.
-# Deixe vazio para não marcar ninguém. Configure como Secret/Variable ROLE_ID.
+# (Opcional) IDs dos cargos a marcar. Configure como Variables no GitHub:
+#   ROLE_ID     -> cargo marcado nos posts de 2D/gerais (ex: @2d-commission-taker)
+#   ROLE_ID_3D  -> cargo marcado nos posts de 3D        (ex: @3d-commission-taker)
+# Deixe vazio para não marcar ninguém.
 ROLE_ID = os.environ.get("ROLE_ID", "").strip()
+ROLE_ID_3D = os.environ.get("ROLE_ID_3D", "").strip()
 
 # Quantos posts novos no máximo por execução (evita flood no canal).
 MAX_POSTS_PER_RUN = 10
@@ -178,11 +181,11 @@ def is_3d(entry, feed_info):
     return any(re.search(r"(?<![a-z0-9])" + re.escape(k) + r"(?![a-z0-9])", blob) for k in KEYWORDS_3D)
 
 
-def send_to_discord(embed, webhook):
+def send_to_discord(embed, webhook, role_id=""):
     payload = {"embeds": [embed], "allowed_mentions": {"parse": []}}
-    if ROLE_ID:
-        payload["content"] = f"<@&{ROLE_ID}>"
-        payload["allowed_mentions"] = {"roles": [ROLE_ID]}
+    if role_id:
+        payload["content"] = f"<@&{role_id}>"
+        payload["allowed_mentions"] = {"roles": [role_id]}
     for _ in range(3):
         r = requests.post(webhook, json=payload, timeout=20)
         if r.status_code == 429:  # rate limit do Discord
@@ -263,7 +266,8 @@ def check_feeds():
     for entry, fi in to_send[-MAX_POSTS_PER_RUN:]:
         is3d = is_3d(entry, fi)
         webhook = WEBHOOK_URL_3D if (is3d and WEBHOOK_URL_3D) else WEBHOOK_URL
-        if send_to_discord(build_embed(entry, fi["name"], is3d), webhook):
+        role = ROLE_ID_3D if is3d else ROLE_ID
+        if send_to_discord(build_embed(entry, fi["name"], is3d), webhook, role):
             sent += 1
             print(f"✅ Enviado: {entry.get('title', '')[:60]}")
         else:
